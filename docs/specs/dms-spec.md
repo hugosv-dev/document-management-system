@@ -195,16 +195,19 @@ Decisões:
 | component  | `frontend/src/components/UploadComponent.jsx`  | Seleção e envio de arquivo, feedback de sucesso/erro              |
 | component  | `frontend/src/components/DocumentList.jsx`     | Tabela de documentos (nome, tamanho, data) com ação de download   |
 | component  | `frontend/src/components/DownloadButton.jsx`   | Baixar um documento pelo `id`                                     |
+| component  | `frontend/src/components/StatusMessage.jsx`    | Mensagem reutilizável de carregamento, sucesso ou erro            |
 | page       | `frontend/src/pages/DocumentsPage.jsx`         | Compor upload + lista e recarregar a lista após upload            |
 | raiz       | `frontend/src/App.jsx`                         | Campo de usuário atual e renderização da página                   |
 
 Decisões:
 
 - Componentes funcionais com hooks (`useState`, `useEffect`).
-- Todas as chamadas usam o prefixo `/api` e enviam `X-User-Id`.
+- Todas as chamadas usam o prefixo `/api` e enviam `X-User-Id`, centralizadas
+  em uma única função `request` do cliente de API.
 - **Download via `fetch` + `Blob`**: um link `<a href>` simples não envia
   cabeçalhos customizados; o `DownloadButton` obtém o blob e dispara o
-  download com `URL.createObjectURL`, usando o nome de `Content-Disposition`.
+  download com `URL.createObjectURL`, usando o `originalName` já presente na
+  listagem como nome do arquivo.
 
 ### Riscos e limitações conhecidas
 
