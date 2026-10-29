@@ -159,29 +159,33 @@ Fluxo de dependência: `routes -> controllers -> services -> repositories`.
 Camadas internas não conhecem camadas externas (o service não conhece Express
 nem multer).
 
-| Camada         | Arquivo previsto                                   | Responsabilidade                                                                 |
-| -------------- | -------------------------------------------------- | -------------------------------------------------------------------------------- |
-| config         | `backend/src/config.js`                            | Ler variáveis de ambiente e aplicar padrões                                      |
-| routes         | `backend/src/routes/documentRoutes.js`             | Declarar endpoints, aplicar o middleware do multer e delegar ao controller       |
-| middleware     | `backend/src/routes/uploadMiddleware.js`           | Configurar `multer.diskStorage` (destino `STORAGE_DIR`, nome UUID, limite)       |
-| controllers    | `backend/src/controllers/documentController.js`    | Ler `X-User-Id`, validar entrada, mapear resultados e erros para HTTP            |
-| services       | `backend/src/services/documentService.js`          | Regras de negócio: registrar, listar por dono, localizar para download           |
-| repositories   | `backend/src/repositories/documentMetadataRepository.js` | Metadados em memória (`Map` por `id`)                                     |
-| repositories   | `backend/src/repositories/fileStorageRepository.js`      | Acesso ao filesystem local (caminho absoluto, verificação de existência) |
-| composição     | `backend/src/app.js`                               | Montar dependências (factories) e registrar o roteador                           |
+| Camada       | Arquivo                                               | Responsabilidade                                                                                   |
+| ------------ | ----------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| config       | `backend/src/config.js`                               | Ler variáveis de ambiente e aplicar padrões                                                        |
+| routes       | `backend/src/routes/documents.routes.js`              | Declarar endpoints, configurar `multer.diskStorage` (destino, nome UUID, limite) e delegar         |
+| controllers  | `backend/src/controllers/documents.controller.js`     | Validar `X-User-Id`, ler `req.file`, mapear resultados e erros para HTTP                           |
+| services     | `backend/src/services/documents.service.js`           | Regras de negócio: registrar, listar por dono, localizar para download (`NotFoundError`)           |
+| repositories | `backend/src/repositories/documents.repository.js`    | Metadados em memória (`Map` por `id`) e acesso ao filesystem local (caminho, existência do arquivo) |
+| composição   | `backend/src/app.js`                                  | Montar dependências (`createApp`) e registrar o roteador                                           |
+
+Os nomes seguem o padrão `<recurso>.<camada>.js` do prompt reutilizável
+`/scaffold-camada` (`.github/prompts/scaffold-camada.prompt.md`).
 
 Decisões:
 
 - **Injeção por factories**: cada camada é criada por uma função que recebe
-  suas dependências (`createDocumentService({ metadataRepository, fileStorage })`),
-  facilitando testes sem mocks globais.
+  suas dependências (`createDocumentsService({ repository })`), facilitando
+  testes sem mocks globais.
 - **Multer na camada de rotas**: o upload físico é um detalhe de infraestrutura
   HTTP; o service recebe apenas os dados já gravados (`storedName`,
-  `originalName`, `mimeType`, `size`, `owner`).
-- **Erros de domínio**: o service sinaliza "não encontrado" com um erro
-  identificável (ex.: `NotFoundError`); o controller o traduz para `404`.
-  Erros do multer (`LIMIT_FILE_SIZE`) são traduzidos para `413`.
-- **`app.js` exportável**: mantém `module.exports = app` para uso nos testes.
+  `originalName`, `mimeType`, `size`, `owner`). O `X-User-Id` é validado antes
+  do multer, para que nada seja gravado em requisições sem usuário.
+- **Erros de domínio**: o service sinaliza "não encontrado" com `NotFoundError`;
+  o tratador de erros do controller o traduz para `404`. Erros do multer viram
+  `413` (`LIMIT_FILE_SIZE`) ou `400` (demais códigos, como campo diferente de
+  `file`); o multer remove arquivos parciais em caso de erro.
+- **`app.js` exportável**: mantém `module.exports = app` e expõe `createApp(config)`
+  para os testes usarem um `STORAGE_DIR` temporário.
 
 ### Frontend - componentes React
 
@@ -220,27 +224,26 @@ Etapas na ordem de implementação. Cada etapa deve manter `npm test` passando.
    `STORAGE_DIR` e `MAX_FILE_SIZE_MB` com padrões; garantir a criação do
    diretório de armazenamento.
    *Aceite*: valores padrão aplicados quando as variáveis não existem.
-2. **Repositórios** - implementar `documentMetadataRepository` (`save`,
-   `findById`, `findByOwner`) e `fileStorageRepository` (`resolvePath`,
-   `exists`).
-   *Aceite*: testes unitários com `node:test` para salvar, buscar e filtrar por dono.
-3. **Service** - implementar `documentService` (`registerDocument`,
+2. **Repositório** - implementar `documents.repository.js` (`save`,
+   `findById`, `findByOwner`, `resolveFilePath`, `fileExists`).
+   *Aceite*: metadados filtrados por dono e caminho sempre dentro de `STORAGE_DIR`.
+3. **Service** - implementar `documents.service.js` (`registerDocument`,
    `listDocuments`, `getDocumentForDownload`) gerando `id` e `uploadedAt` e
    ocultando `storedName` na representação pública.
    *Aceite*: testes cobrindo listagem por dono e `NotFoundError` para
    documento inexistente, de outro usuário ou ausente no disco.
-4. **Middleware de upload e controller** - configurar `multer.diskStorage`
-   (destino `STORAGE_DIR`, nome UUID + extensão, `limits.fileSize`) e o
-   `documentController` com validação de `X-User-Id` e mapeamento de erros
+4. **Controller** - implementar `documents.controller.js` com validação de
+   `X-User-Id`, handlers de upload/listagem/download e tratador de erros
    (400, 404, 413, 500).
    *Aceite*: respostas de erro no formato `{ "error": "..." }`.
-5. **Rotas e composição** - criar `documentRoutes` com `POST /upload`,
-   `GET /documents` e `GET /documents/:id/download`; montar as dependências e
-   registrar o roteador em `backend/src/app.js`, preservando `/health`.
+5. **Rotas e composição** - criar `documents.routes.js` com `multer.diskStorage`
+   (destino `STORAGE_DIR`, nome UUID + extensão, `limits.fileSize`) e as rotas
+   `POST /upload`, `GET /documents` e `GET /documents/:id/download`; montar as
+   dependências e registrar o roteador em `backend/src/app.js`, preservando `/health`.
    *Aceite*: backend sobe com `npm run dev` e responde aos três endpoints.
-6. **Testes de integração do backend** - testar o fluxo HTTP completo
-   (upload -> listagem -> download) e os casos de erro usando `app` em porta
-   efêmera e um `STORAGE_DIR` temporário.
+6. **Testes do backend** - em `backend/test/`, testar configuração, service e o
+   fluxo HTTP completo (upload -> listagem -> download) com os casos de erro,
+   usando `createApp` em porta efêmera e um `STORAGE_DIR` temporário.
    *Aceite*: `cd backend && npm test` passa.
 7. **Cliente de API do frontend** - criar `frontend/src/services/documentApi.js`
    com `fetch`, prefixo `/api`, cabeçalho `X-User-Id` e tratamento de erros.
