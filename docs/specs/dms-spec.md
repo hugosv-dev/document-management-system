@@ -64,7 +64,7 @@ exclusivamente no filesystem local da aplicação.
 | RNF-03 | Configuração via variáveis de ambiente (12-Factor)                                             |
 | RNF-04 | Nome físico do arquivo gerado pelo sistema (UUID), nunca derivado do nome enviado pelo usuário |
 | RNF-05 | Erros retornados em JSON no formato `{ "error": "mensagem" }`, com mensagens em português     |
-| RNF-06 | Backend testado com o runner nativo do Node (`node:test`), executado por `npm test`            |
+| RNF-06 | Backend testado com o runner nativo do Node (`node:test`), executado por `npm test`; a pipeline `.github/workflows/ci.yml` roda install e testes do backend e install e build do frontend em todo push e pull request (Node 24) |
 | RNF-07 | Nenhuma dependência nova além das presentes nos `package.json` (express, multer, react, vite) |
 | RNF-08 | Upload limitado a um único arquivo, sem campos extras (`fields: 0`, `parts: 1`); corpos muito acima do limite são recusados pelo `Content-Length` antes da leitura |
 | RNF-09 | Downloads servidos como `application/octet-stream`; todas as respostas com `X-Content-Type-Options: nosniff` e sem `X-Powered-By` |

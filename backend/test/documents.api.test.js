@@ -1,55 +1,25 @@
+// Fluxo completo, casos de erro e segurança da API de documentos.
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
-const { createApp } = require('../src/app');
+const { startApiTestServer } = require('../test-support/apiTestServer');
 
 const MAX_FILE_SIZE_BYTES = 64;
 
 describe('API de documentos', () => {
-  let storageDir;
-  let server;
-  let baseUrl;
+  let api;
 
   before(async () => {
-    storageDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dms-api-'));
-    const app = createApp({
-      port: 0,
-      storageDir,
-      maxFileSizeMb: MAX_FILE_SIZE_BYTES / (1024 * 1024),
-      maxFileSizeBytes: MAX_FILE_SIZE_BYTES,
-    });
-
-    await new Promise((resolve) => {
-      server = app.listen(0, resolve);
-    });
-    baseUrl = `http://127.0.0.1:${server.address().port}`;
+    api = await startApiTestServer({ maxFileSizeBytes: MAX_FILE_SIZE_BYTES });
   });
 
   after(async () => {
-    await new Promise((resolve) => server.close(resolve));
-    fs.rmSync(storageDir, { recursive: true, force: true });
+    await api.stop();
   });
 
-  function upload(userId, { content = 'olá mundo', name = 'relatório.txt', field = 'file' } = {}) {
-    const form = new FormData();
-    form.append(field, new Blob([content], { type: 'text/plain' }), name);
-    const headers = userId ? { 'X-User-Id': userId } : {};
-    return fetch(`${baseUrl}/upload`, { method: 'POST', headers, body: form });
-  }
-
-  function get(urlPath, userId) {
-    const headers = userId ? { 'X-User-Id': userId } : {};
-    return fetch(`${baseUrl}${urlPath}`, { headers });
-  }
-
-  function storedFiles() {
-    return fs.readdirSync(storageDir);
-  }
-
   it('envia, lista e baixa um documento', async () => {
-    const uploadResponse = await upload('ana');
+    const uploadResponse = await api.upload('ana');
     assert.equal(uploadResponse.status, 201);
     const document = await uploadResponse.json();
 
@@ -59,12 +29,12 @@ describe('API de documentos', () => {
     assert.equal(document.mimeType, 'text/plain');
     assert.ok(!('storedName' in document));
 
-    const listResponse = await get('/documents', 'ana');
+    const listResponse = await api.get('/documents', 'ana');
     assert.equal(listResponse.status, 200);
     const documents = await listResponse.json();
     assert.ok(documents.some((item) => item.id === document.id));
 
-    const downloadResponse = await get(`/documents/${document.id}/download`, 'ana');
+    const downloadResponse = await api.get(`/documents/${document.id}/download`, 'ana');
     assert.equal(downloadResponse.status, 200);
     assert.equal(downloadResponse.headers.get('content-type'), 'application/octet-stream');
     assert.equal(downloadResponse.headers.get('x-content-type-options'), 'nosniff');
@@ -78,43 +48,39 @@ describe('API de documentos', () => {
   it('serve como octet-stream mesmo quando o upload declara HTML', async () => {
     const form = new FormData();
     form.append('file', new Blob(['<script>alert(1)</script>'], { type: 'text/html' }), 'x.html');
-    const response = await fetch(`${baseUrl}/upload`, {
-      method: 'POST',
-      headers: { 'X-User-Id': 'ana' },
-      body: form,
-    });
+    const response = await api.uploadForm('ana', form);
     const document = await response.json();
 
-    const download = await get(`/documents/${document.id}/download`, 'ana');
+    const download = await api.get(`/documents/${document.id}/download`, 'ana');
 
     assert.equal(download.headers.get('content-type'), 'application/octet-stream');
     assert.equal(download.headers.get('x-content-type-options'), 'nosniff');
   });
 
   it('grava o arquivo com nome gerado pelo sistema', async () => {
-    const existingFiles = new Set(storedFiles());
+    const existingFiles = new Set(api.storedFiles());
 
-    const response = await upload('ana', { name: '../../fora.txt' });
+    const response = await api.upload('ana', { name: '../../fora.txt' });
     assert.equal(response.status, 201);
 
-    const created = storedFiles().filter((file) => !existingFiles.has(file));
+    const created = api.storedFiles().filter((file) => !existingFiles.has(file));
     assert.equal(created.length, 1);
     assert.match(created[0], /^[0-9a-f-]{36}\.txt$/);
   });
 
   it('não expõe documentos de outro usuário', async () => {
-    const document = await (await upload('ana')).json();
+    const document = await (await api.upload('ana')).json();
 
-    const documents = await (await get('/documents', 'bruno')).json();
+    const documents = await (await api.get('/documents', 'bruno')).json();
     assert.ok(documents.every((item) => item.owner === 'bruno'));
 
-    const response = await get(`/documents/${document.id}/download`, 'bruno');
+    const response = await api.get(`/documents/${document.id}/download`, 'bruno');
     assert.equal(response.status, 404);
     assert.deepEqual(await response.json(), { error: 'Documento não encontrado.' });
   });
 
   it('retorna lista vazia para usuário sem documentos', async () => {
-    const response = await get('/documents', 'sem-documentos');
+    const response = await api.get('/documents', 'sem-documentos');
 
     assert.equal(response.status, 200);
     assert.deepEqual(await response.json(), []);
@@ -122,9 +88,9 @@ describe('API de documentos', () => {
 
   it('exige o cabeçalho X-User-Id', async () => {
     const responses = [
-      await upload(''),
-      await get('/documents'),
-      await get('/documents/qualquer/download'),
+      await api.upload(''),
+      await api.get('/documents'),
+      await api.get('/documents/qualquer/download'),
     ];
 
     for (const response of responses) {
@@ -135,7 +101,7 @@ describe('API de documentos', () => {
 
   it('rejeita X-User-Id fora do formato permitido', async () => {
     for (const userId of ['ana maria', 'a'.repeat(65), 'ana/../bruno']) {
-      const response = await get('/documents', userId);
+      const response = await api.get('/documents', userId);
 
       assert.equal(response.status, 400, userId);
       assert.match((await response.json()).error, /^Usuário inválido/);
@@ -143,73 +109,67 @@ describe('API de documentos', () => {
   });
 
   it('rejeita campos extras no upload sem gravar arquivos', async () => {
-    const fileCountBefore = storedFiles().length;
+    const fileCountBefore = api.storedFiles().length;
     const form = new FormData();
     form.append('descricao', 'x'.repeat(1024));
     form.append('file', new Blob(['conteudo']), 'a.txt');
 
-    const response = await fetch(`${baseUrl}/upload`, {
-      method: 'POST',
-      headers: { 'X-User-Id': 'ana' },
-      body: form,
-    });
+    const response = await api.uploadForm('ana', form);
 
     assert.equal(response.status, 400);
     assert.match((await response.json()).error, /campo "file"/);
-    assert.equal(storedFiles().length, fileCountBefore);
+    assert.equal(api.storedFiles().length, fileCountBefore);
   });
 
   it('rejeita upload sem arquivo', async () => {
-    const response = await fetch(`${baseUrl}/upload`, {
-      method: 'POST',
-      headers: { 'X-User-Id': 'ana' },
-      body: new FormData(),
-    });
+    const response = await api.uploadForm('ana', new FormData());
 
     assert.equal(response.status, 400);
     assert.deepEqual(await response.json(), { error: 'Nenhum arquivo enviado.' });
   });
 
   it('rejeita arquivo enviado em campo diferente de "file"', async () => {
-    const response = await upload('ana', { field: 'documento' });
+    const response = await api.upload('ana', { field: 'documento' });
 
     assert.equal(response.status, 400);
     assert.match((await response.json()).error, /campo "file"/);
   });
 
   it('rejeita arquivo acima do tamanho máximo sem deixar resíduo no disco', async () => {
-    const fileCountBefore = storedFiles().length;
+    const fileCountBefore = api.storedFiles().length;
 
-    const response = await upload('ana', { content: 'x'.repeat(MAX_FILE_SIZE_BYTES + 1) });
+    const response = await api.upload('ana', { content: 'x'.repeat(MAX_FILE_SIZE_BYTES + 1) });
 
     assert.equal(response.status, 413);
     assert.match((await response.json()).error, /tamanho máximo/);
-    assert.equal(storedFiles().length, fileCountBefore);
+    assert.equal(api.storedFiles().length, fileCountBefore);
   });
 
   it('rejeita cedo pelo Content-Length um corpo muito acima do limite', async () => {
-    const fileCountBefore = storedFiles().length;
+    const fileCountBefore = api.storedFiles().length;
 
-    const response = await upload('ana', { content: 'x'.repeat(MAX_FILE_SIZE_BYTES + 128 * 1024) });
+    const response = await api.upload('ana', {
+      content: 'x'.repeat(MAX_FILE_SIZE_BYTES + 128 * 1024),
+    });
 
     assert.equal(response.status, 413);
     assert.equal(response.headers.get('connection'), 'close');
     assert.match((await response.json()).error, /tamanho máximo/);
-    assert.equal(storedFiles().length, fileCountBefore);
+    assert.equal(api.storedFiles().length, fileCountBefore);
   });
 
   it('responde em JSON para rota inexistente e URL malformada', async () => {
-    const notFound = await get('/nao-existe');
+    const notFound = await api.get('/nao-existe');
     assert.equal(notFound.status, 404);
     assert.deepEqual(await notFound.json(), { error: 'Recurso não encontrado.' });
 
-    const malformed = await get('/documents/%E0%A4%A/download', 'ana');
+    const malformed = await api.get('/documents/%E0%A4%A/download', 'ana');
     assert.equal(malformed.status, 400);
     assert.deepEqual(await malformed.json(), { error: 'Requisição inválida.' });
   });
 
   it('não aceita JSON em rotas que não o utilizam', async () => {
-    const response = await fetch(`${baseUrl}/health`, {
+    const response = await api.request('/health', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: '{inválido',
@@ -221,18 +181,18 @@ describe('API de documentos', () => {
   });
 
   it('retorna 404 para documento inexistente', async () => {
-    const response = await get('/documents/nao-existe/download', 'ana');
+    const response = await api.get('/documents/nao-existe/download', 'ana');
 
     assert.equal(response.status, 404);
   });
 
   it('retorna 404 quando o arquivo foi removido do disco', async () => {
-    const existingFiles = new Set(storedFiles());
-    const document = await (await upload('ana')).json();
-    const [storedName] = storedFiles().filter((file) => !existingFiles.has(file));
-    fs.rmSync(path.join(storageDir, storedName));
+    const existingFiles = new Set(api.storedFiles());
+    const document = await (await api.upload('ana')).json();
+    const [storedName] = api.storedFiles().filter((file) => !existingFiles.has(file));
+    fs.rmSync(path.join(api.storageDir, storedName));
 
-    const response = await get(`/documents/${document.id}/download`, 'ana');
+    const response = await api.get(`/documents/${document.id}/download`, 'ana');
 
     assert.equal(response.status, 404);
   });
