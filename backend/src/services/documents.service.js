@@ -1,11 +1,5 @@
 const crypto = require('node:crypto');
-
-class NotFoundError extends Error {
-  constructor(message = 'Documento não encontrado.') {
-    super(message);
-    this.name = 'NotFoundError';
-  }
-}
+const { NotFoundError } = require('../errors');
 
 function toPublicDocument({ storedName, ...publicFields }) {
   return publicFields;
@@ -16,8 +10,8 @@ function createDocumentsService({
   generateId = () => crypto.randomUUID(),
   now = () => new Date(),
 }) {
-  function registerDocument({ owner, originalName, mimeType, size, storedName }) {
-    const document = {
+  async function registerDocument({ owner, originalName, mimeType, size, storedName }) {
+    const document = await repository.save({
       id: generateId(),
       originalName,
       mimeType,
@@ -25,30 +19,21 @@ function createDocumentsService({
       uploadedAt: now().toISOString(),
       owner,
       storedName,
-    };
+    });
 
-    repository.save(document);
     return toPublicDocument(document);
   }
 
-  function listDocuments(owner) {
-    // reverse + sort estável: em empates de data, o último enviado vem primeiro.
-    return repository
-      .findByOwner(owner)
-      .reverse()
-      .sort((a, b) => b.uploadedAt.localeCompare(a.uploadedAt))
-      .map(toPublicDocument);
+  async function listDocuments(owner) {
+    const documents = await repository.findByOwner(owner);
+    return documents.map(toPublicDocument);
   }
 
   async function getDocumentForDownload(owner, id) {
-    const document = repository.findById(id);
+    const document = await repository.findById(id);
 
     // Documentos de outro usuário são tratados como inexistentes.
     if (!document || document.owner !== owner) {
-      throw new NotFoundError();
-    }
-
-    if (!(await repository.fileExists(document.storedName))) {
       throw new NotFoundError();
     }
 
@@ -61,4 +46,4 @@ function createDocumentsService({
   return { registerDocument, listDocuments, getDocumentForDownload };
 }
 
-module.exports = { createDocumentsService, NotFoundError };
+module.exports = { createDocumentsService };

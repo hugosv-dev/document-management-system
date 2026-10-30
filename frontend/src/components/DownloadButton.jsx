@@ -2,6 +2,8 @@ import { useState } from 'react';
 import { downloadDocument } from '../services/documentApi.js';
 import StatusMessage from './StatusMessage.jsx';
 
+const REVOKE_DELAY_MS = 1000;
+
 // Um link <a href> não envia o cabeçalho X-User-Id; por isso o arquivo é
 // obtido via fetch e salvo a partir de um Blob.
 function saveBlob(blob, fileName) {
@@ -12,7 +14,8 @@ function saveBlob(blob, fileName) {
   document.body.appendChild(link);
   link.click();
   link.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 0);
+  // Liberar a URL imediatamente pode cancelar o download em alguns navegadores.
+  setTimeout(() => URL.revokeObjectURL(url), REVOKE_DELAY_MS);
 }
 
 export default function DownloadButton({ userId, documentId, fileName }) {

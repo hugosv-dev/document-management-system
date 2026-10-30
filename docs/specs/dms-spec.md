@@ -66,17 +66,23 @@ exclusivamente no filesystem local da aplicação.
 | RNF-05 | Erros retornados em JSON no formato `{ "error": "mensagem" }`, com mensagens em português     |
 | RNF-06 | Backend testado com o runner nativo do Node (`node:test`), executado por `npm test`            |
 | RNF-07 | Nenhuma dependência nova além das presentes nos `package.json` (express, multer, react, vite) |
+| RNF-08 | Upload limitado a um único arquivo, sem campos extras (`fields: 0`, `parts: 1`); corpos muito acima do limite são recusados pelo `Content-Length` antes da leitura |
+| RNF-09 | Downloads servidos como `application/octet-stream`; todas as respostas com `X-Content-Type-Options: nosniff` e sem `X-Powered-By` |
+| RNF-10 | Configuração inválida impede a inicialização com mensagem clara (fail fast)                   |
 
 ### Variáveis de ambiente
 
 | Variável           | Padrão                     | Descrição                                     |
 | ------------------ | -------------------------- | --------------------------------------------- |
-| `PORT`             | `3000`                     | Porta HTTP do backend                         |
-| `STORAGE_DIR`      | `backend/storage`          | Diretório local onde os arquivos são gravados |
-| `MAX_FILE_SIZE_MB` | `10`                       | Tamanho máximo do upload, em megabytes        |
+| `PORT`             | `3000`                     | Porta HTTP do backend (inteiro entre 1 e 65535) |
+| `STORAGE_DIR`      | `backend/storage`          | Diretório local onde os arquivos são gravados; caminhos relativos partem de `backend/` |
+| `MAX_FILE_SIZE_MB` | `10`                       | Tamanho máximo do upload, em megabytes (maior que zero) |
+| `VITE_MAX_FILE_SIZE_MB` | `10`                  | Frontend: limite usado para recusar arquivos antes do envio; deve acompanhar `MAX_FILE_SIZE_MB` |
 
 O diretório de armazenamento é criado na inicialização caso não exista. O
-conteúdo de `backend/storage` já é ignorado pelo Git (`.gitignore`).
+conteúdo de `backend/storage` já é ignorado pelo Git (`.gitignore`). Como os
+metadados ficam em memória, os arquivos de execuções anteriores ficam órfãos
+após reiniciar o backend; apague-os manualmente, preservando o `.gitkeep`.
 
 ## 5. Modelo de dados (metadados do documento)
 
@@ -109,8 +115,13 @@ Convenções gerais:
 
 - O backend expõe as rotas **sem** prefixo. O frontend chama `/api/...` e o
   proxy do Vite remove o prefixo antes de encaminhar para `http://localhost:3000`.
-- Todas as rotas de documentos exigem o cabeçalho `X-User-Id`.
-- Respostas de erro: `{ "error": "mensagem em português" }`.
+- Todas as rotas de documentos exigem o cabeçalho `X-User-Id`, no formato
+  `^[A-Za-z0-9._-]{1,64}$`. Fora do formato, a resposta é `400` com
+  `Usuário inválido. ...`.
+- Respostas de erro: `{ "error": "mensagem em português" }`, inclusive para
+  rotas inexistentes (`404 Recurso não encontrado.`), URLs malformadas
+  (`400 Requisição inválida.`) e falhas inesperadas
+  (`500 Erro interno ao processar a requisição.`).
 
 ### POST /upload
 
@@ -122,8 +133,9 @@ Convenções gerais:
 | ------ | --------------------------------------------- | ------------------------------------------ |
 | 400    | `X-User-Id` ausente ou vazio                  | `Usuário não informado.`                   |
 | 400    | Campo `file` ausente                          | `Nenhum arquivo enviado.`                  |
+| 400    | Arquivo em outro campo, mais de um arquivo ou campos extras | `Requisição de upload inválida. Envie um único arquivo no campo "file".` |
 | 413    | Arquivo maior que `MAX_FILE_SIZE_MB`          | `Arquivo excede o tamanho máximo de 10 MB.` |
-| 500    | Falha inesperada ao gravar o arquivo          | `Erro interno ao processar o documento.`   |
+| 500    | Falha inesperada ao gravar o arquivo          | `Erro interno ao processar a requisição.`  |
 
 ### GET /documents
 
@@ -139,7 +151,8 @@ Convenções gerais:
 
 - Cabeçalhos: `X-User-Id: <usuario>`
 - Saída `200 OK`: conteúdo binário do arquivo, com
-  `Content-Type` igual ao `mimeType` e
+  `Content-Type: application/octet-stream` (o `mimeType` informado no upload
+  não é confiável para ser servido) e
   `Content-Disposition: attachment; filename="<originalName>"`
 
 | Status | Situação                                                  | Exemplo de mensagem          |
@@ -161,12 +174,17 @@ nem multer).
 
 | Camada       | Arquivo                                               | Responsabilidade                                                                                   |
 | ------------ | ----------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| config       | `backend/src/config.js`                               | Ler variáveis de ambiente e aplicar padrões                                                        |
-| routes       | `backend/src/routes/documents.routes.js`              | Declarar endpoints, configurar `multer.diskStorage` (destino, nome UUID, limite) e delegar         |
-| controllers  | `backend/src/controllers/documents.controller.js`     | Validar `X-User-Id`, ler `req.file`, mapear resultados e erros para HTTP                           |
+| config       | `backend/src/config.js`                               | Ler e validar variáveis de ambiente (lança erro se inválidas)                                      |
+| erros        | `backend/src/errors.js`                               | `AppError` (mensagem + status HTTP) e `NotFoundError` (404)                                        |
+| middlewares  | `backend/src/middlewares/user.middleware.js`          | Validar `X-User-Id` (presença e formato)                                                           |
+| middlewares  | `backend/src/middlewares/upload.middleware.js`        | Configurar `multer.diskStorage` e limites; converter erros do multer em `AppError` (400/413)       |
+| middlewares  | `backend/src/middlewares/error.middleware.js`         | 404 de rotas inexistentes e tratador global de erros em JSON                                        |
+| routes       | `backend/src/routes/documents.routes.js`              | Declarar endpoints e encadear middlewares e controller                                             |
+| controllers  | `backend/src/controllers/documents.controller.js`     | Ler `req.file`/`req.params`, chamar o service e montar a resposta HTTP                             |
 | services     | `backend/src/services/documents.service.js`           | Regras de negócio: registrar, listar por dono, localizar para download (`NotFoundError`)           |
-| repositories | `backend/src/repositories/documents.repository.js`    | Metadados em memória (`Map` por `id`) e acesso ao filesystem local (caminho, existência do arquivo) |
-| composição   | `backend/src/app.js`                                  | Montar dependências (`createApp`) e registrar o roteador                                           |
+| repositories | `backend/src/repositories/documents.repository.js`    | Metadados em memória (índices por `id` e por dono) e regras do armazenamento local (nome físico, caminho) |
+| composição   | `backend/src/app.js`                                  | Montar dependências (`createApp`), cabeçalhos de segurança e tratadores de erro                    |
+| entrada      | `backend/src/server.js`                               | Validar a configuração e iniciar o servidor (`npm start` / `npm run dev`)                          |
 
 Os nomes seguem o padrão `<recurso>.<camada>.js` do prompt reutilizável
 `/scaffold-camada` (`.github/prompts/scaffold-camada.prompt.md`).
@@ -176,16 +194,23 @@ Decisões:
 - **Injeção por factories**: cada camada é criada por uma função que recebe
   suas dependências (`createDocumentsService({ repository })`), facilitando
   testes sem mocks globais.
-- **Multer na camada de rotas**: o upload físico é um detalhe de infraestrutura
+- **Contratos assíncronos**: todos os métodos do repositório e do service são
+  `async`, para que a persistência possa evoluir (arquivo, banco) sem mudar as
+  camadas de cima.
+- **Repositório dono do armazenamento**: gera o nome físico (UUID + extensão
+  validada) e resolve caminhos com `path.basename`; o middleware de upload
+  recebe `storageDir` e `createStoredName` do repositório via `app.js`.
+- **Multer em middleware**: o upload físico é um detalhe de infraestrutura
   HTTP; o service recebe apenas os dados já gravados (`storedName`,
   `originalName`, `mimeType`, `size`, `owner`). O `X-User-Id` é validado antes
-  do multer, para que nada seja gravado em requisições sem usuário.
-- **Erros de domínio**: o service sinaliza "não encontrado" com `NotFoundError`;
-  o tratador de erros do controller o traduz para `404`. Erros do multer viram
-  `413` (`LIMIT_FILE_SIZE`) ou `400` (demais códigos, como campo diferente de
-  `file`); o multer remove arquivos parciais em caso de erro.
-- **`app.js` exportável**: mantém `module.exports = app` e expõe `createApp(config)`
-  para os testes usarem um `STORAGE_DIR` temporário.
+  do multer, para que nada seja gravado em requisições sem usuário; o multer
+  remove arquivos parciais em caso de erro.
+- **Erros com status**: `AppError` carrega o status HTTP; o tratador global em
+  `app.js` responde `{ "error": "..." }` sem expor stack traces. Arquivo
+  removido do disco entre a consulta e o envio (`ENOENT`) vira `404`.
+- **`app.js` exportável**: `require('./app')` retorna o app Express (contrato do
+  teste de fumaça do seed) e também expõe `createApp(config)` para os testes
+  usarem um `STORAGE_DIR` temporário. O `listen` fica em `server.js`.
 
 ### Frontend - componentes React
 
@@ -197,7 +222,8 @@ Decisões:
 | component  | `frontend/src/components/DownloadButton.jsx`   | Baixar um documento pelo `id`                                     |
 | component  | `frontend/src/components/StatusMessage.jsx`    | Mensagem reutilizável de carregamento, sucesso ou erro            |
 | page       | `frontend/src/pages/DocumentsPage.jsx`         | Compor upload + lista e recarregar a lista após upload            |
-| raiz       | `frontend/src/App.jsx`                         | Campo de usuário atual e renderização da página                   |
+| config     | `frontend/src/config.js`                       | Limite de tamanho (`VITE_MAX_FILE_SIZE_MB`) e formato do usuário  |
+| raiz       | `frontend/src/App.jsx`                         | Formulário de usuário (botão "Entrar") e renderização da página   |
 
 Decisões:
 
@@ -207,7 +233,12 @@ Decisões:
 - **Download via `fetch` + `Blob`**: um link `<a href>` simples não envia
   cabeçalhos customizados; o `DownloadButton` obtém o blob e dispara o
   download com `URL.createObjectURL`, usando o `originalName` já presente na
-  listagem como nome do arquivo.
+  listagem como nome do arquivo. A URL temporária é liberada após 1 segundo.
+- **Troca de usuário explícita**: o usuário só muda ao clicar em "Entrar" e
+  após validar o formato; `DocumentsPage` recebe `key={usuário}` e é recriada,
+  descartando arquivo selecionado e mensagens do usuário anterior.
+- **Validação antecipada**: arquivos acima de `VITE_MAX_FILE_SIZE_MB` são
+  recusados antes do envio; o backend continua sendo a validação definitiva.
 
 ### Riscos e limitações conhecidas
 
@@ -215,9 +246,12 @@ Decisões:
   `backend/storage` permanecem órfãos (aceito nesta fase; persistência fica
   para uma evolução futura).
 - `X-User-Id` não é autenticação: qualquer cliente pode se passar por outro
-  usuário. Adequado apenas ao escopo do workshop.
-- Não há validação de tipo de arquivo; o limite de tamanho é a única proteção
-  contra uploads abusivos.
+  usuário. Adequado apenas ao escopo do workshop (a interface exibe esse
+  aviso). A evolução recomendada é derivar o dono de uma sessão autenticada no
+  servidor, o que também permitiria downloads por link direto.
+- Não há validação de tipo de arquivo nem cotas por usuário; o limite de
+  tamanho por arquivo é a única proteção contra uploads abusivos, e o disco
+  pode crescer sem limite.
 
 ## 8. Plano de execução
 

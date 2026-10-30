@@ -4,7 +4,8 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { createDocumentsRepository } = require('../src/repositories/documents.repository');
-const { createDocumentsService, NotFoundError } = require('../src/services/documents.service');
+const { createDocumentsService } = require('../src/services/documents.service');
+const { NotFoundError } = require('../src/errors');
 
 describe('documents.service', () => {
   let storageDir;
@@ -36,8 +37,8 @@ describe('documents.service', () => {
     fs.rmSync(storageDir, { recursive: true, force: true });
   });
 
-  it('registra o documento sem expor o nome físico', () => {
-    const document = register('ana', 'interno.txt');
+  it('registra o documento sem expor o nome físico', async () => {
+    const document = await register('ana', 'interno.txt');
 
     assert.deepEqual(document, {
       id: 'doc-1',
@@ -49,12 +50,12 @@ describe('documents.service', () => {
     });
   });
 
-  it('lista apenas os documentos do dono, do mais recente para o mais antigo', () => {
-    register('ana');
-    register('bruno');
-    register('ana');
+  it('lista apenas os documentos do dono, do mais recente para o mais antigo', async () => {
+    await register('ana');
+    await register('bruno');
+    await register('ana');
 
-    const documents = service.listDocuments('ana');
+    const documents = await service.listDocuments('ana');
 
     assert.deepEqual(
       documents.map((document) => document.id),
@@ -64,28 +65,24 @@ describe('documents.service', () => {
   });
 
   it('retorna o caminho do arquivo para download do próprio dono', async () => {
-    const { id } = register('ana', 'existe.txt');
-    fs.writeFileSync(path.join(storageDir, 'existe.txt'), 'conteudo');
+    const { id } = await register('ana', 'existe.txt');
 
     const document = await service.getDocumentForDownload('ana', id);
 
     assert.equal(document.filePath, path.join(storageDir, 'existe.txt'));
   });
 
-  it('lança NotFoundError para documento inexistente', async () => {
-    await assert.rejects(service.getDocumentForDownload('ana', 'nao-existe'), NotFoundError);
+  it('lança NotFoundError (404) para documento inexistente', async () => {
+    await assert.rejects(service.getDocumentForDownload('ana', 'nao-existe'), (error) => {
+      assert.ok(error instanceof NotFoundError);
+      assert.equal(error.status, 404);
+      return true;
+    });
   });
 
   it('lança NotFoundError para documento de outro usuário', async () => {
-    const { id } = register('ana', 'existe.txt');
-    fs.writeFileSync(path.join(storageDir, 'existe.txt'), 'conteudo');
+    const { id } = await register('ana');
 
     await assert.rejects(service.getDocumentForDownload('bruno', id), NotFoundError);
-  });
-
-  it('lança NotFoundError quando o arquivo não está mais no disco', async () => {
-    const { id } = register('ana', 'removido.txt');
-
-    await assert.rejects(service.getDocumentForDownload('ana', id), NotFoundError);
   });
 });

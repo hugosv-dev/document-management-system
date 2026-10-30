@@ -66,11 +66,29 @@ describe('API de documentos', () => {
 
     const downloadResponse = await get(`/documents/${document.id}/download`, 'ana');
     assert.equal(downloadResponse.status, 200);
-    assert.match(downloadResponse.headers.get('content-type'), /^text\/plain/);
+    assert.equal(downloadResponse.headers.get('content-type'), 'application/octet-stream');
+    assert.equal(downloadResponse.headers.get('x-content-type-options'), 'nosniff');
+    assert.equal(downloadResponse.headers.get('x-powered-by'), null);
     const contentDisposition = downloadResponse.headers.get('content-disposition');
     assert.match(contentDisposition, /^attachment;/);
     assert.match(contentDisposition, /filename="relatório\.txt"/);
     assert.equal(await downloadResponse.text(), 'olá mundo');
+  });
+
+  it('serve como octet-stream mesmo quando o upload declara HTML', async () => {
+    const form = new FormData();
+    form.append('file', new Blob(['<script>alert(1)</script>'], { type: 'text/html' }), 'x.html');
+    const response = await fetch(`${baseUrl}/upload`, {
+      method: 'POST',
+      headers: { 'X-User-Id': 'ana' },
+      body: form,
+    });
+    const document = await response.json();
+
+    const download = await get(`/documents/${document.id}/download`, 'ana');
+
+    assert.equal(download.headers.get('content-type'), 'application/octet-stream');
+    assert.equal(download.headers.get('x-content-type-options'), 'nosniff');
   });
 
   it('grava o arquivo com nome gerado pelo sistema', async () => {
@@ -115,6 +133,32 @@ describe('API de documentos', () => {
     }
   });
 
+  it('rejeita X-User-Id fora do formato permitido', async () => {
+    for (const userId of ['ana maria', 'a'.repeat(65), 'ana/../bruno']) {
+      const response = await get('/documents', userId);
+
+      assert.equal(response.status, 400, userId);
+      assert.match((await response.json()).error, /^Usuário inválido/);
+    }
+  });
+
+  it('rejeita campos extras no upload sem gravar arquivos', async () => {
+    const fileCountBefore = storedFiles().length;
+    const form = new FormData();
+    form.append('descricao', 'x'.repeat(1024));
+    form.append('file', new Blob(['conteudo']), 'a.txt');
+
+    const response = await fetch(`${baseUrl}/upload`, {
+      method: 'POST',
+      headers: { 'X-User-Id': 'ana' },
+      body: form,
+    });
+
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /campo "file"/);
+    assert.equal(storedFiles().length, fileCountBefore);
+  });
+
   it('rejeita upload sem arquivo', async () => {
     const response = await fetch(`${baseUrl}/upload`, {
       method: 'POST',
@@ -141,6 +185,39 @@ describe('API de documentos', () => {
     assert.equal(response.status, 413);
     assert.match((await response.json()).error, /tamanho máximo/);
     assert.equal(storedFiles().length, fileCountBefore);
+  });
+
+  it('rejeita cedo pelo Content-Length um corpo muito acima do limite', async () => {
+    const fileCountBefore = storedFiles().length;
+
+    const response = await upload('ana', { content: 'x'.repeat(MAX_FILE_SIZE_BYTES + 128 * 1024) });
+
+    assert.equal(response.status, 413);
+    assert.equal(response.headers.get('connection'), 'close');
+    assert.match((await response.json()).error, /tamanho máximo/);
+    assert.equal(storedFiles().length, fileCountBefore);
+  });
+
+  it('responde em JSON para rota inexistente e URL malformada', async () => {
+    const notFound = await get('/nao-existe');
+    assert.equal(notFound.status, 404);
+    assert.deepEqual(await notFound.json(), { error: 'Recurso não encontrado.' });
+
+    const malformed = await get('/documents/%E0%A4%A/download', 'ana');
+    assert.equal(malformed.status, 400);
+    assert.deepEqual(await malformed.json(), { error: 'Requisição inválida.' });
+  });
+
+  it('não aceita JSON em rotas que não o utilizam', async () => {
+    const response = await fetch(`${baseUrl}/health`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{inválido',
+    });
+
+    assert.equal(response.status, 404);
+    const body = await response.text();
+    assert.doesNotMatch(body, /at |node_modules/);
   });
 
   it('retorna 404 para documento inexistente', async () => {
