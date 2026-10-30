@@ -1,32 +1,51 @@
-// Seed do servidor backend do Document Management System.
+// Composição do backend do Document Management System.
 //
-// Este arquivo é apenas um ponto de partida mínimo. Ao longo do workshop você
-// vai usar o Agent Mode do GitHub Copilot para construir as camadas:
-//   - routes/       (definição das rotas)
-//   - controllers/  (entrada HTTP e validação)
-//   - services/     (regras de negócio)
-//   - repositories/ (persistência: arquivos locais + metadados em memória)
-//
-// Restrição do projeto: uploads são gravados no filesystem local da aplicação
-// usando multer com diskStorage. Não utilize provedores externos.
+// Clean Architecture simples: routes -> controllers -> services -> repositories.
+// Uploads são gravados no filesystem local com multer + diskStorage; não
+// utilize provedores externos.
 
 const express = require('express');
+const { loadConfig } = require('./config');
+const { createDocumentsRepository } = require('./repositories/documents.repository');
+const { createDocumentsService } = require('./services/documents.service');
+const { createDocumentsController } = require('./controllers/documents.controller');
+const { createDocumentsRouter } = require('./routes/documents.routes');
+const { requireUser } = require('./middlewares/user.middleware');
+const { createUploadMiddleware } = require('./middlewares/upload.middleware');
+const { notFoundHandler, errorHandler } = require('./middlewares/error.middleware');
 
-const app = express();
-const PORT = process.env.PORT || 3000;
-
-app.use(express.json());
-
-// Endpoint de verificação de saúde. As demais rotas (/upload, /documents,
-// /documents/:id/download) serão implementadas durante o Passo 2.
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok' });
-});
-
-if (require.main === module) {
-  app.listen(PORT, () => {
-    console.log(`DMS backend ouvindo na porta ${PORT}`);
-  });
+function setSecurityHeaders(req, res, next) {
+  res.set('X-Content-Type-Options', 'nosniff');
+  next();
 }
 
-module.exports = app;
+function createApp(config) {
+  const app = express();
+
+  app.disable('x-powered-by');
+  app.use(setSecurityHeaders);
+
+  app.get('/health', (req, res) => {
+    res.json({ status: 'ok' });
+  });
+
+  const repository = createDocumentsRepository({ storageDir: config.storageDir });
+  const service = createDocumentsService({ repository });
+  const controller = createDocumentsController({ service });
+  const uploadFile = createUploadMiddleware({
+    storageDir: repository.storageDir,
+    createStoredName: repository.createStoredName,
+    maxFileSizeBytes: config.maxFileSizeBytes,
+    maxFileSizeMb: config.maxFileSizeMb,
+  });
+
+  app.use(createDocumentsRouter({ controller, requireUser, uploadFile }));
+  app.use(notFoundHandler);
+  app.use(errorHandler);
+
+  return app;
+}
+
+// O seed (test/app.test.js) espera que require('./app') retorne o app Express.
+module.exports = createApp(loadConfig());
+module.exports.createApp = createApp;
